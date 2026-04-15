@@ -2,6 +2,16 @@
 
 All notable changes to `laravel-make-pdf` will be documented in this file.
 
+## v2.0.2 - 2026-04-15
+
+### What's Changed
+
+### Fixed
+
+- **Base64 encoded fonts now render correctly** — Inline `@font-face` declarations with `data:` URIs in `<style>` tags were not being applied when generating PDFs. The driver now waits for the page load event after injecting HTML via `Page.setDocumentContent`, ensuring Chrome has fully parsed and applied all embedded resources before printing.
+
+**Full Changelog**: https://github.com/jellebreuer/laravel-pdf-chrome-driver/compare/v2.0.1...v2.0.2
+
 ## v2.0.1 - 2026-04-05
 
 ### What's New
