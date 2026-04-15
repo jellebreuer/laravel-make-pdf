@@ -87,10 +87,14 @@ class ChromeDriver implements PdfDriver
             /** @var array{result: array{frameTree: array{frame: array{id: string}}}} $frame_tree */
             $frame_tree = $chrome->send('Page.getFrameTree', [], $session_id);
 
+            $loadEvent = $chrome->queueEventWait('Page.loadEventFired', $session_id);
+
             $chrome->send('Page.setDocumentContent', [
                 'frameId' => $frame_tree['result']['frameTree']['frame']['id'],
                 'html' => $html,
             ], $session_id);
+
+            $chrome->drainEventWait($loadEvent);
 
             $print_params = [
                 'landscape' => $landscape,

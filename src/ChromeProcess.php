@@ -18,7 +18,7 @@ class ChromeProcess
     protected float $deadline = 0;
 
     /** @var list<array{match: callable, resolver: Deferred<array<string, mixed>>}> */
-    protected array $waitingForResponse = [];
+    protected array $pendingWaits = [];
 
     protected static bool $shutdownRegistered = false;
 
@@ -31,7 +31,7 @@ class ChromeProcess
     public function start(array $command, array $env = []): void
     {
         $this->messageId = 0;
-        $this->waitingForResponse = [];
+        $this->pendingWaits = [];
         $this->deadline = microtime(true) + 30;
 
         $cmd = 'exec '.implode(' ', array_map('escapeshellarg', $command));
@@ -123,6 +123,54 @@ class ChromeProcess
         );
     }
 
+    /**
+     * Pre-register a listener for a CDP event before it fires.
+     *
+     * Returns a Deferred that resolves when the event arrives — even if it
+     * arrives during a subsequent send() call. Call drainEventWait() to block
+     * until the event has been received.
+     *
+     * @return Deferred<array<string, mixed>>
+     */
+    public function queueEventWait(string $event, ?string $sessionId = null): Deferred
+    {
+        /** @var Deferred<array<string, mixed>> $resolver */
+        $resolver = new Deferred;
+
+        $this->pendingWaits[] = [
+            'match' => fn (array $msg) => ($msg['method'] ?? null) === $event
+                && ($sessionId === null || ($msg['sessionId'] ?? null) === $sessionId),
+            'resolver' => $resolver,
+        ];
+
+        return $resolver;
+    }
+
+    /**
+     * Block until a previously queued event wait resolves.
+     *
+     * @param  Deferred<array<string, mixed>>  $deferred
+     * @return array<string, mixed>
+     */
+    public function drainEventWait(Deferred $deferred): array
+    {
+        $remaining = $this->deadline - microtime(true);
+        if ($remaining <= 0) {
+            throw new \RuntimeException('CDP timeout');
+        }
+
+        $timer = Loop::addTimer($remaining, static function () use ($deferred): void {
+            $deferred->reject(new \RuntimeException('CDP timeout'));
+        });
+
+        try {
+            /** @var array<string, mixed> */
+            return await($deferred->promise());
+        } finally {
+            Loop::cancelTimer($timer);
+        }
+    }
+
     public function onExit(callable $callback): void
     {
         $this->process?->on('exit', $callback);
@@ -168,7 +216,7 @@ class ChromeProcess
         /** @var Deferred<array<string, mixed>> $resolver */
         $resolver = new Deferred;
 
-        $this->waitingForResponse[] = ['match' => $match, 'resolver' => $resolver];
+        $this->pendingWaits[] = ['match' => $match, 'resolver' => $resolver];
 
         $timer = Loop::addTimer($remaining, function () use ($resolver): void {
             $resolver->reject(new \RuntimeException('CDP timeout'));
@@ -192,8 +240,8 @@ class ChromeProcess
     {
         // CDP errors should reject the first pending wait
         if (isset($message['error'])) {
-            foreach ($this->waitingForResponse as $i => $entry) {
-                array_splice($this->waitingForResponse, $i, 1);
+            foreach ($this->pendingWaits as $i => $entry) {
+                array_splice($this->pendingWaits, $i, 1);
                 $entry['resolver']->reject(
                     new \RuntimeException('CDP error: '.json_encode($message['error']))
                 );
@@ -202,9 +250,9 @@ class ChromeProcess
             }
         }
 
-        foreach ($this->waitingForResponse as $i => $entry) {
+        foreach ($this->pendingWaits as $i => $entry) {
             if ($entry['match']($message)) {
-                array_splice($this->waitingForResponse, $i, 1);
+                array_splice($this->pendingWaits, $i, 1);
                 $entry['resolver']->resolve($message);
 
                 return;
